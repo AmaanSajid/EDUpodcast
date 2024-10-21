@@ -10,31 +10,30 @@ import numpy as np
 import faiss
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import io
+from google.cloud import texttospeech
 
 # Set up Google Cloud credentials
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "focus-ensign-437302-v1-a14f1f892574.json"
 aiplatform.init(project="focus-ensign-437302-v1",location="us-central1")
 
-def extract_text_from_pdf(pdf_file):
-    with fitz.open(stream=pdf_file.read(), filetype="pdf") as doc:
+def extract_text_from_pdf(pdf_content):
+    with fitz.open(stream=pdf_content, filetype="pdf") as doc:
         text = ""
         for page in doc:
             text += page.get_text()
     return text
 
-def display_pdf(pdf_file):
-    # Reset file pointer to beginning
-    pdf_file.seek(0)
+def display_pdf(pdf_content):
+    # Convert to base64
+    base64_pdf = base64.b64encode(pdf_content).decode('utf-8')
     
-    # Read PDF file
-    base64_pdf = base64.b64encode(pdf_file.read()).decode('utf-8')
-    
-    # Embed PDF viewer
+    # Embed PDF viewer with adjusted height for sidebar
     pdf_display = f"""
         <iframe
             src="data:application/pdf;base64,{base64_pdf}"
             width="100%"
-            height="800px"
+            height="600px"
             type="application/pdf">
         </iframe>
     """
@@ -118,9 +117,9 @@ def generate_answer(question, context):
     response = model.generate_content(prompt)
     return response.text
 
-def process_pdf(uploaded_file):
+def process_pdf(pdf_content):
     # Extract text
-    text = extract_text_from_pdf(uploaded_file)
+    text = extract_text_from_pdf(pdf_content)
     
     # Generate summary
     summary = generate_summary(text)
@@ -141,17 +140,47 @@ def process_pdf(uploaded_file):
     
     return index_path, ids_path, chunks_path, summary
 
+def generate_podcast(summary, output_filename="podcast.mp3"):
+    client = texttospeech.TextToSpeechClient()
+    
+    synthesis_input = texttospeech.SynthesisInput(text=summary)
+    
+    voice = texttospeech.VoiceSelectionParams(
+        language_code="en-US",
+        name="en-US-Neural2-J",
+        ssml_gender=texttospeech.SsmlVoiceGender.MALE
+    )
+    
+    audio_config = texttospeech.AudioConfig(
+        audio_encoding=texttospeech.AudioEncoding.MP3
+    )
+    
+    response = client.synthesize_speech(
+        input=synthesis_input, voice=voice, audio_config=audio_config
+    )
+    
+    with open(output_filename, "wb") as out:
+        out.write(response.audio_content)
+    
+    return output_filename
+
 def main():
+    st.set_page_config(layout="wide")
     st.title('EDUprodcast')
-    
-    uploaded_file = st.file_uploader('Upload a PDF file', type='pdf')
-    
-    if uploaded_file:
-        st.success(f'Uploaded: {uploaded_file.name}')
+    # Sidebar
+    with st.sidebar:
         
+        uploaded_file = st.file_uploader('Upload a PDF file', type='pdf')
+        
+        if uploaded_file:
+            st.session_state.pdf_content = uploaded_file.read()
+            st.success(f'Uploaded: {uploaded_file.name}')
+    
+    # Main content
+    if 'pdf_content' in st.session_state and st.session_state.pdf_content is not None:
         try:
             with st.spinner('Processing PDF...'):
-                index_path, ids_path, chunks_path, summary = process_pdf(uploaded_file)
+                index_path, ids_path, chunks_path, summary = process_pdf(st.session_state.pdf_content)
                 
                 # Load processed data
                 index, ids = load_faiss_index(index_path, ids_path)
@@ -160,35 +189,40 @@ def main():
             
             st.success('PDF processed successfully!')
             
-            # Create two columns
-            col1, col2 = st.columns([0.6, 0.4])
+            # Main content area
+            st.markdown("## Document Analysis")
             
-            with col1:
-                st.markdown("### PDF Preview")
-                pdf_display = display_pdf(uploaded_file)
-                st.markdown(pdf_display, unsafe_allow_html=True)
+            # Summary section
+            st.markdown("### Document Summary")
+            st.write(summary)
             
-            with col2:
-                # Summary section
-                st.markdown("### Document Summary")
-                st.markdown(summary)
-                
-                # Question answering section
-                st.markdown("### Ask Questions")
-                question = st.text_input("Enter your question about the document:")
-                if st.button("Get Answer"):
-                    if question:
-                        with st.spinner("Generating answer..."):
-                            # Find relevant chunks
-                            context = search_similar_chunks(question, index, ids, chunks)
-                            
-                            # Generate answer
-                            answer = generate_answer(question, context)
-                            
-                            st.markdown("#### Answer:")
-                            st.markdown(answer)
-                    else:
-                        st.warning("Please enter a question.")
+            # Podcast generation section
+            st.markdown("### Generate Podcast")
+            if st.button("Generate Podcast"):
+                with st.spinner("Generating podcast..."):
+                    podcast_file = generate_podcast(summary)
+                    st.audio(podcast_file)
+                    st.success(f"Podcast generated successfully! You can listen to it above.")
+            
+            # Question answering section
+            st.markdown("### Ask Questions")
+            question = st.text_input("Enter your question about the document:")
+            if st.button("Get Answer"):
+                if question:
+                    with st.spinner("Generating answer..."):
+                        # Find relevant chunks
+                        context = search_similar_chunks(question, index, ids, chunks)
+                        
+                        # Generate answer
+                        answer = generate_answer(question, context)
+                        
+                        # Display question and answer
+                        st.markdown("#### Your Question:")
+                        st.write(question)
+                        st.markdown("#### Answer:")
+                        st.write(answer)
+                else:
+                    st.warning("Please enter a question.")
                     
         except Exception as e:
             st.error(f"An error occurred: {str(e)}")
